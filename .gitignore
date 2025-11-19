@@ -1,0 +1,45 @@
+# Downloaded CRC files
+*.tar.xz
+*.crcbundle
+crc-linux-*
+crc
+
+# Docker
+.docker/
+
+# Temporary files
+*.tmp
+*.log
+tmp/
+temp/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Test output
+test-output/
+test-cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Credentials (double-check these are in .gitignore)
+*.pem
+*.key
+secrets/
+.env
+
+# Build artifacts
+build/
+dist/
+.build-cache/
+
