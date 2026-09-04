@@ -91,10 +91,8 @@ echo -e "${YELLOW}Extracting archive...${NC}"
 tar -xvf crc.tar.xz
 
 # Find the CRC binary
-CRC_BINARY=""
-if [ -d crc-linux-* ] && [ -f crc-linux-*/crc ]; then
-  CRC_BINARY=$(find crc-linux-* -name "crc" -type f | head -1)
-elif [ -f crc ]; then
+CRC_BINARY=$(find . -maxdepth 2 -name "crc" -type f -path "*/crc-linux-*" | head -1)
+if [ -z "$CRC_BINARY" ] && [ -f crc ]; then
   CRC_BINARY="crc"
 fi
 
@@ -119,13 +117,14 @@ else
     exit 1
 fi
 
-# Extract bundle (optional - uncomment if needed)
+# Extract bundle to current directory (tar preserves original versioned filename)
 echo ""
 echo -e "${YELLOW}Extracting CRC bundle...${NC}"
-BUNDLE_NAME=$(docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" cat /cache/bundle_name.txt)
-docker cp "$CONTAINER_ID:/cache/bundle.crcbundle" "./${BUNDLE_NAME}"
-echo -e "${GREEN}✓ Bundle extracted: ${BUNDLE_NAME}${NC}"
-echo -e "${YELLOW}Note: CRC will download the bundle during 'crc setup' if not manually configured${NC}"
+BUNDLE_FILE=$(docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" cat /cache/bundle_name.txt 2>/dev/null || echo "unknown")
+docker cp "$CONTAINER_ID:/cache/bundle.tar" ./bundle.tar
+tar -xf bundle.tar
+rm bundle.tar
+echo -e "${GREEN}✓ Bundle extracted: ${BUNDLE_FILE}${NC}"
 
 # Clean up extracted files
 rm -rf crc.tar.xz crc-linux-*

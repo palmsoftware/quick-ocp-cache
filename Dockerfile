@@ -6,6 +6,7 @@ FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi-minimal:lates
 
 ARG OCP_VERSION
 ARG TARGETARCH
+ARG CRC_VERSION
 ARG CRC_MIRROR_URL=https://developers.redhat.com/content-gateway/rest/mirror/pub/openshift-v4/clients/crc
 ARG BUNDLE_MIRROR_URL=https://mirror.openshift.com/pub/openshift-v4/clients/crc/bundles/openshift
 
@@ -16,18 +17,22 @@ RUN microdnf install -y curl tar gzip jq && microdnf clean all || \
 
 WORKDIR /cache
 
-# Determine CRC version from OCP version
-# This maps OCP versions to their corresponding CRC versions
+# Determine CRC version — prefer the explicit build arg passed by CI.
+# Falls back to a hardcoded mapping or GitHub API for local builds.
 # See: https://github.com/crc-org/crc/releases
 RUN echo "Determining CRC version for OCP ${OCP_VERSION}..." && \
-    case "${OCP_VERSION}" in \
-        "4.18") CRC_VERSION="2.51.0" ;; \
-        "4.19") CRC_VERSION="2.54.0" ;; \
-        "4.20") CRC_VERSION="2.56.0" ;; \
-        *) echo "Fetching latest CRC version for OCP ${OCP_VERSION}..."; \
-           CRC_VERSION=$(curl -s "https://api.github.com/repos/crc-org/crc/releases/latest" | \
-                        jq -r '.tag_name | ltrimstr("v")') ;; \
-    esac && \
+    if [ -n "${CRC_VERSION}" ]; then \
+        echo "Using explicit CRC_VERSION build arg: ${CRC_VERSION}"; \
+    else \
+        case "${OCP_VERSION}" in \
+            "4.18") CRC_VERSION="2.51.0" ;; \
+            "4.19") CRC_VERSION="2.54.0" ;; \
+            "4.20") CRC_VERSION="2.56.0" ;; \
+            *) echo "Fetching latest CRC version for OCP ${OCP_VERSION}..."; \
+               CRC_VERSION=$(curl -s "https://api.github.com/repos/crc-org/crc/releases/latest" | \
+                            jq -r '.tag_name | ltrimstr("v")') ;; \
+        esac; \
+    fi && \
     echo "${CRC_VERSION}" > /cache/crc_version.txt && \
     echo "Using CRC version: ${CRC_VERSION}"
 
@@ -92,7 +97,7 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
         echo "Found OCP patch version: ${LATEST_PATCH}" && \
         BUNDLE_URL="${BUNDLE_MIRROR_URL}/${LATEST_PATCH}/" && \
         BUNDLE_FILE=$(curl -s "${BUNDLE_URL}" 2>/dev/null | \
-            grep -oE 'crc_libvirt_[0-9.]+_amd64\.crcbundle' | head -1 || true) && \
+            grep -oE "crc_(libvirt|vfkit)_[0-9.]+_${TARGETARCH}\.crcbundle" | head -1 || true) && \
         \
         if [ -n "$BUNDLE_FILE" ]; then \
             echo "Found bundle in new location: ${BUNDLE_FILE}" && \
@@ -131,6 +136,13 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
     \
     echo "Bundle download complete. Size: $(stat -c%s /cache/bundle.crcbundle 2>/dev/null || stat -f%z /cache/bundle.crcbundle) bytes"
 
+# Wrap bundle in a tar preserving the original versioned filename.
+# Consumers extract with: tar -xf bundle.tar -C ~/.crc/cache/
+RUN BUNDLE_FILE=$(cat /cache/bundle_name.txt) && \
+    cp /cache/bundle.crcbundle "/cache/${BUNDLE_FILE}" && \
+    tar -cf /cache/bundle.tar -C /cache "${BUNDLE_FILE}" && \
+    rm /cache/bundle.crcbundle "/cache/${BUNDLE_FILE}"
+
 # Create metadata file
 RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
     BINARY_NAME=$(cat /cache/binary_name.txt) && \
@@ -144,7 +156,7 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
   "binary_name": "${BINARY_NAME}",
   "bundle_name": "${BUNDLE_NAME}",
   "binary_size": $(stat -c%s /cache/crc-binary.tar.xz 2>/dev/null || stat -f%z /cache/crc-binary.tar.xz),
-  "bundle_size": $(stat -c%s /cache/bundle.crcbundle 2>/dev/null || stat -f%z /cache/bundle.crcbundle),
+  "bundle_size": $(stat -c%s /cache/bundle.tar 2>/dev/null || stat -f%z /cache/bundle.tar),
   "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "mirror_url": "${CRC_MIRROR_URL}/${CRC_VERSION}",
   "bundle_url": "${BUNDLE_MIRROR_URL}/${OCP_VERSION}"
@@ -154,7 +166,7 @@ EOF
 # Verify downloads
 RUN ls -lh /cache && \
     test -f /cache/crc-binary.tar.xz || (echo "ERROR: CRC binary missing" && exit 1) && \
-    test -f /cache/bundle.crcbundle || (echo "ERROR: Bundle missing" && exit 1) && \
+    test -f /cache/bundle.tar || (echo "ERROR: Bundle missing" && exit 1) && \
     test -f /cache/metadata.json || (echo "ERROR: Metadata missing" && exit 1)
 
 # Final minimal image
@@ -176,7 +188,7 @@ WORKDIR /cache
 
 # Copy downloaded files from builder
 COPY --from=downloader /cache/crc-binary.tar.xz .
-COPY --from=downloader /cache/bundle.crcbundle .
+COPY --from=downloader /cache/bundle.tar .
 COPY --from=downloader /cache/bundle_name.txt .
 COPY --from=downloader /cache/binary_name.txt .
 COPY --from=downloader /cache/crc_version.txt .
@@ -203,11 +215,10 @@ RUN printf '%s\n' \
     'tar -xvf /cache/crc-binary.tar.xz -C "${DEST_DIR}"' \
     'echo "✓ CRC binary extracted"' \
     '' \
-    '# Copy bundle with original name' \
-    'BUNDLE_NAME=$(cat /cache/bundle_name.txt)' \
+    '# Extract bundle (tar preserves original versioned filename)' \
     'mkdir -p "${DEST_DIR}/bundle"' \
-    'cp /cache/bundle.crcbundle "${DEST_DIR}/bundle/${BUNDLE_NAME}"' \
-    'echo "✓ Bundle copied as ${BUNDLE_NAME}"' \
+    'tar -xf /cache/bundle.tar -C "${DEST_DIR}/bundle/"' \
+    'echo "✓ Bundle extracted to ${DEST_DIR}/bundle/"' \
     '' \
     'echo "=== Extraction complete! ==="' \
     'ls -lh "${DEST_DIR}"' \

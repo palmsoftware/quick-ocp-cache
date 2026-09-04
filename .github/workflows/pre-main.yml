@@ -1,0 +1,119 @@
+name: Pre-merge Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PINS_URL: https://raw.githubusercontent.com/palmsoftware/quick-ocp/main/crc-version-pins.json
+  CRC_MIRROR_URL: https://mirror.openshift.com/pub/openshift-v4/clients/crc
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile with hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Dockerfile
+
+      - name: Lint shell scripts with shellcheck
+        run: |
+          sudo apt-get install -y -q shellcheck
+          shellcheck --severity=error scripts/*.sh
+
+  validate-pins:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch and validate crc-version-pins.json
+        run: |
+          set -e
+
+          echo "Fetching pins from palmsoftware/quick-ocp..."
+          PINS=$(curl -fsSL "${{ env.PINS_URL }}")
+          echo "${PINS}" | jq .
+
+          # Resolve "auto" to latest CRC release once
+          LATEST_CRC=$(curl -fsSL "https://api.github.com/repos/crc-org/crc/releases/latest" \
+            | jq -r '.tag_name | ltrimstr("v")')
+          echo ""
+          echo "Latest CRC release: ${LATEST_CRC}"
+          echo ""
+
+          FAILED=0
+          SUMMARY=""
+
+          # Iterate all OCP version keys except "latest"
+          while IFS= read -r OCP_VER; do
+            PIN=$(echo "${PINS}" | jq -r --arg v "${OCP_VER}" '.version_pins[$v]')
+            if [ "${PIN}" = "auto" ]; then
+              CRC_VER="${LATEST_CRC}"
+            else
+              CRC_VER="${PIN}"
+            fi
+
+            echo "=== OCP ${OCP_VER} → CRC ${CRC_VER} (pin: ${PIN}) ==="
+            SUMMARY="${SUMMARY}  OCP ${OCP_VER} → CRC ${CRC_VER}\n"
+
+            # 1. Verify the CRC release tag exists on GitHub (skip for "auto" — latest already confirmed)
+            if [ "${PIN}" != "auto" ]; then
+              HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" \
+                "https://api.github.com/repos/crc-org/crc/releases/tags/v${CRC_VER}")
+              if [ "${HTTP_STATUS}" = "200" ]; then
+                echo "  ✓ CRC release v${CRC_VER} exists on GitHub"
+              else
+                echo "  ✗ CRC release v${CRC_VER} NOT found on GitHub (HTTP ${HTTP_STATUS})"
+                FAILED=1
+              fi
+            else
+              echo "  ✓ CRC release v${CRC_VER} confirmed via /releases/latest"
+            fi
+
+            # 2. Check if this version is in the known broken list
+            BROKEN=$(echo "${PINS}" | jq -r \
+              --arg ocp "${OCP_VER}" --arg crc "${CRC_VER}" \
+              '.known_issues[$ocp].broken_versions // [] | contains([$crc]) | tostring')
+            if [ "${BROKEN}" = "true" ]; then
+              ISSUE_URL=$(echo "${PINS}" | jq -r --arg ocp "${OCP_VER}" \
+                '.known_issues[$ocp].issue // "unknown"')
+              DESCRIPTION=$(echo "${PINS}" | jq -r --arg ocp "${OCP_VER}" \
+                '.known_issues[$ocp].description // "no description"')
+              echo "  ✗ CRC ${CRC_VER} is listed as a KNOWN BROKEN version for OCP ${OCP_VER}"
+              echo "    Description: ${DESCRIPTION}"
+              echo "    Issue: ${ISSUE_URL}"
+              FAILED=1
+            else
+              echo "  ✓ CRC ${CRC_VER} is not in the known broken list for OCP ${OCP_VER}"
+            fi
+
+            # 3. Check mirror reachability for the CRC binary
+            MIRROR_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --head \
+              "${{ env.CRC_MIRROR_URL }}/${CRC_VER}/crc-linux-amd64.tar.xz")
+            if [ "${MIRROR_STATUS}" = "200" ] || [ "${MIRROR_STATUS}" = "302" ] || [ "${MIRROR_STATUS}" = "307" ]; then
+              echo "  ✓ CRC binary reachable at mirror (HTTP ${MIRROR_STATUS})"
+            else
+              echo "  ✗ CRC binary NOT reachable at mirror (HTTP ${MIRROR_STATUS})"
+              echo "    URL: ${{ env.CRC_MIRROR_URL }}/${CRC_VER}/crc-linux-amd64.tar.xz"
+              FAILED=1
+            fi
+
+            echo ""
+          done < <(echo "${PINS}" | jq -r '.version_pins | keys[] | select(. != "latest")')
+
+          # Summary
+          echo "================================================"
+          echo "Summary:"
+          echo -e "${SUMMARY}"
+          echo "================================================"
+
+          if [ "${FAILED}" -ne 0 ]; then
+            echo ""
+            echo "::error::One or more version pin validations failed. See above for details."
+            exit 1
+          fi
+
+          echo "All pins valid."
