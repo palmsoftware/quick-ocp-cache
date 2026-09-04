@@ -268,10 +268,15 @@ save_to_crc_cache() {
     if [ -f "/tmp/bundle_name-${ocp_ver}.txt" ]; then
         local bundle_name=$(cat "/tmp/bundle_name-${ocp_ver}.txt")
         local dest_path="${CRC_CACHE_DIR}/${bundle_name}"
-        
+
         if [ ! -f "$dest_path" ]; then
             echo -e "${YELLOW}  Extracting bundle from image...${NC}"
-            $CONTAINER_RUNTIME cp "${container_id}:/cache/bundle.crcbundle" "$dest_path" 2>/dev/null
+            local tmp_tar="/tmp/bundle-${ocp_ver}.tar"
+            $CONTAINER_RUNTIME cp "${container_id}:/cache/bundle.tar" "$tmp_tar" 2>/dev/null
+            if [ -f "$tmp_tar" ]; then
+                tar -xf "$tmp_tar" -C "$CRC_CACHE_DIR"
+                rm "$tmp_tar"
+            fi
             if [ -f "$dest_path" ]; then
                 echo -e "${GREEN}✓ Saved bundle to: ${dest_path}${NC}"
                 echo -e "${GREEN}  (Can be reused by CRC and future builds)${NC}"
@@ -297,14 +302,17 @@ build_version() {
         return 1
     fi
     
-    # Use CRC version as the image tag
-    local image_tag="${REGISTRY}/${IMAGE_NAME}:${crc_ver}"
+    # Use OCP version as the primary image tag (matches user expectations)
+    # Also tag with CRC version for reference
+    local image_tag="${REGISTRY}/${IMAGE_NAME}:${ocp_ver}"
+    local crc_tag="${REGISTRY}/${IMAGE_NAME}:${crc_ver}"
     
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${YELLOW}Building for OCP ${ocp_ver} → CRC ${crc_ver}${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo "Image: ${image_tag}"
+    echo "OCP Tag: ${image_tag}"
+    echo "CRC Tag: ${crc_tag}"
     echo "OCP Version: ${ocp_ver}"
     echo "CRC Version: ${crc_ver}"
     echo "Multi-arch: ${MULTI_ARCH}"
@@ -367,19 +375,21 @@ build_version() {
                     --label crc_version="${crc_ver}" \
                     --progress=plain \
                     -t "${image_tag}-amd64" \
+                    -t "${crc_tag}-amd64" \
                     .
                 echo ""
                 echo -e "${GREEN}✓ amd64 build complete${NC}"
                 echo ""
                 
-                echo -e "${BLUE}Pushing amd64 image...${NC}"
+                echo -e "${BLUE}Pushing amd64 images (OCP ${ocp_ver} + CRC ${crc_ver})...${NC}"
                 $CONTAINER_RUNTIME push "${image_tag}-amd64"
+                $CONTAINER_RUNTIME push "${crc_tag}-amd64"
                 echo ""
                 echo -e "${GREEN}✓ amd64 pushed${NC}"
                 echo ""
                 
                 echo -e "${YELLOW}Cleaning up amd64 image to free space...${NC}"
-                $CONTAINER_RUNTIME rmi "${image_tag}-amd64" || true
+                $CONTAINER_RUNTIME rmi "${image_tag}-amd64" "${crc_tag}-amd64" || true
                 echo ""
                 
                 # Build and push arm64, then clean up to save space
@@ -393,32 +403,86 @@ build_version() {
                     --label crc_version="${crc_ver}" \
                     --progress=plain \
                     -t "${image_tag}-arm64" \
+                    -t "${crc_tag}-arm64" \
                     .
                 echo ""
                 echo -e "${GREEN}✓ arm64 build complete${NC}"
                 echo ""
                 
-                echo -e "${BLUE}Pushing arm64 image...${NC}"
+                echo -e "${BLUE}Pushing arm64 images (OCP ${ocp_ver} + CRC ${crc_ver})...${NC}"
                 $CONTAINER_RUNTIME push "${image_tag}-arm64"
+                $CONTAINER_RUNTIME push "${crc_tag}-arm64"
                 echo ""
                 echo -e "${GREEN}✓ arm64 pushed${NC}"
                 echo ""
                 
                 echo -e "${YELLOW}Cleaning up arm64 image to free space...${NC}"
-                $CONTAINER_RUNTIME rmi "${image_tag}-arm64" || true
+                $CONTAINER_RUNTIME rmi "${image_tag}-arm64" "${crc_tag}-arm64" || true
                 echo ""
                 
-                # Create and push manifest (pulls manifests, not full images)
-                echo -e "${BLUE}Creating multi-arch manifest...${NC}"
+                # Create and push manifest for OCP version (primary)
+                echo -e "${BLUE}Creating multi-arch manifest for OCP ${ocp_ver}...${NC}"
+                # Remove existing manifest and any conflicting images
+                $CONTAINER_RUNTIME manifest rm "${image_tag}" 2>/dev/null || true
+                $CONTAINER_RUNTIME rmi "${image_tag}" 2>/dev/null || true
                 $CONTAINER_RUNTIME manifest create "${image_tag}" \
                     "${image_tag}-amd64" \
                     "${image_tag}-arm64"
+                echo -e "${GREEN}✓ Manifest created${NC}"
                 echo ""
                 
-                echo -e "${BLUE}Pushing manifest...${NC}"
-                $CONTAINER_RUNTIME manifest push "${image_tag}"
+                # Add explicit platform annotations
+                echo -e "${BLUE}Adding platform annotations...${NC}"
+                $CONTAINER_RUNTIME manifest annotate "${image_tag}" \
+                    "${image_tag}-amd64" \
+                    --os linux --arch amd64
+                
+                $CONTAINER_RUNTIME manifest annotate "${image_tag}" \
+                    "${image_tag}-arm64" \
+                    --os linux --arch arm64
+                echo -e "${GREEN}✓ Platforms annotated${NC}"
                 echo ""
-                echo -e "${GREEN}✓ Multi-arch manifest complete${NC}"
+                
+                # Verify manifest
+                echo -e "${BLUE}Verifying manifest...${NC}"
+                if $CONTAINER_RUNTIME manifest inspect "${image_tag}" | grep -q "linux/amd64"; then
+                    echo -e "${GREEN}✓ Manifest includes linux/amd64${NC}"
+                fi
+                if $CONTAINER_RUNTIME manifest inspect "${image_tag}" | grep -q "linux/arm64"; then
+                    echo -e "${GREEN}✓ Manifest includes linux/arm64${NC}"
+                fi
+                echo ""
+                
+                # Push manifest with all referenced images
+                echo -e "${BLUE}Pushing manifest for OCP ${ocp_ver}...${NC}"
+                $CONTAINER_RUNTIME manifest push --all "${image_tag}"
+                echo -e "${GREEN}✓ OCP ${ocp_ver} manifest pushed${NC}"
+                echo ""
+                
+                # Create and push manifest for CRC version (alias)
+                echo -e "${BLUE}Creating multi-arch manifest for CRC ${crc_ver}...${NC}"
+                # Remove existing manifest and any conflicting images
+                $CONTAINER_RUNTIME manifest rm "${crc_tag}" 2>/dev/null || true
+                $CONTAINER_RUNTIME rmi "${crc_tag}" 2>/dev/null || true
+                $CONTAINER_RUNTIME manifest create "${crc_tag}" \
+                    "${crc_tag}-amd64" \
+                    "${crc_tag}-arm64"
+                
+                $CONTAINER_RUNTIME manifest annotate "${crc_tag}" \
+                    "${crc_tag}-amd64" \
+                    --os linux --arch amd64
+                
+                $CONTAINER_RUNTIME manifest annotate "${crc_tag}" \
+                    "${crc_tag}-arm64" \
+                    --os linux --arch arm64
+                echo ""
+                
+                echo -e "${BLUE}Pushing manifest for CRC ${crc_ver}...${NC}"
+                $CONTAINER_RUNTIME manifest push --all "${crc_tag}"
+                echo -e "${GREEN}✓ CRC ${crc_ver} manifest pushed${NC}"
+                echo ""
+                
+                echo -e "${GREEN}✓ Multi-arch manifests complete (OCP ${ocp_ver} + CRC ${crc_ver})${NC}"
                 echo ""
             else
                 # Build both but don't push (still need both locally)
@@ -533,8 +597,9 @@ build_version() {
     rm -rf "$BUILD_CACHE_DIR"
     
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}✓ Build complete for CRC ${crc_ver} (OCP ${ocp_ver})${NC}"
-    echo -e "${GREEN}  Image: ${image_tag}${NC}"
+    echo -e "${GREEN}✓ Build complete for OCP ${ocp_ver} (CRC ${crc_ver})${NC}"
+    echo -e "${GREEN}  OCP tag: ${image_tag}${NC}"
+    echo -e "${GREEN}  CRC tag: ${crc_tag}${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
 }
@@ -605,11 +670,13 @@ echo ""
 
 if [ "$PUSH" = false ]; then
     echo -e "${YELLOW}Images built locally (not pushed to registry)${NC}"
-    echo "Images are tagged by CRC version (e.g., 2.54.0)"
+    echo "Images are tagged by both OCP version (e.g., 4.19) and CRC version (e.g., 2.54.0)"
     echo "To test: ${CONTAINER_RUNTIME} images | grep ${IMAGE_NAME}"
 else
     echo -e "${GREEN}Images pushed to ${REGISTRY}/${IMAGE_NAME}${NC}"
-    echo "Images are tagged by CRC version (e.g., 2.54.0, 2.56.0)"
-    echo "To pull: ${CONTAINER_RUNTIME} pull ${REGISTRY}/${IMAGE_NAME}:<CRC_VERSION>"
+    echo "Images are tagged by both OCP version (e.g., 4.19, 4.20) and CRC version (e.g., 2.54.0, 2.56.0)"
+    echo ""
+    echo "To pull by OCP version: ${CONTAINER_RUNTIME} pull ${REGISTRY}/${IMAGE_NAME}:4.19"
+    echo "To pull by CRC version: ${CONTAINER_RUNTIME} pull ${REGISTRY}/${IMAGE_NAME}:2.54.0"
 fi
 

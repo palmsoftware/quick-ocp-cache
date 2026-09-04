@@ -1,0 +1,189 @@
+name: Build and Push Cache Images
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly, Sunday 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      ocp_version:
+        description: 'Single OCP version to build (leave empty to build all from pins)'
+        required: false
+        default: ''
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'scripts/**'
+      - '.github/workflows/build-cache.yml'
+
+concurrency:
+  group: build-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: quay.io
+  IMAGE: bapalm/quick-ocp-cache
+  PINS_URL: https://raw.githubusercontent.com/palmsoftware/quick-ocp/main/crc-version-pins.json
+
+jobs:
+  determine-versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve versions from crc-version-pins.json
+        id: resolve
+        run: |
+          PINS=$(curl -fsSL "${{ env.PINS_URL }}")
+
+          # Resolve "auto" to the latest CRC release from GitHub
+          LATEST_CRC=$(curl -fsSL "https://api.github.com/repos/crc-org/crc/releases/latest" \
+            | jq -r '.tag_name | ltrimstr("v")')
+          echo "Latest CRC release: ${LATEST_CRC}"
+
+          if [ -n "${{ github.event.inputs.ocp_version }}" ]; then
+            # Single version requested via workflow_dispatch
+            OCP="${{ github.event.inputs.ocp_version }}"
+            PIN=$(echo "${PINS}" | jq -r --arg v "${OCP}" '.version_pins[$v] // "auto"')
+            CRC=$([ "${PIN}" = "auto" ] && echo "${LATEST_CRC}" || echo "${PIN}")
+            MATRIX=$(jq -cn --arg ocp "${OCP}" --arg crc "${CRC}" '[{"ocp_version":$ocp,"crc_version":$crc}]')
+          else
+            # All versions from pins (excluding "latest" which is a pointer, not a real OCP version)
+            MATRIX=$(echo "${PINS}" | jq -c --arg latest "${LATEST_CRC}" '
+              [.version_pins | to_entries[]
+               | select(.key != "latest")
+               | {ocp_version: .key, crc_version: (if .value == "auto" then $latest else .value end)}]
+            ')
+          fi
+
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+          echo "Resolved matrix:"
+          echo "${MATRIX}" | jq .
+
+  build-amd64:
+    needs: determine-versions
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.determine-versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          df -h
+
+      - name: Prepare build cache directory
+        run: mkdir -p .build-cache
+
+      - name: Build amd64 image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --build-arg OCP_VERSION="${{ matrix.ocp_version }}" \
+            --build-arg CRC_VERSION="${{ matrix.crc_version }}" \
+            --label "ocp_version=${{ matrix.ocp_version }}" \
+            --label "crc_version=${{ matrix.crc_version }}" \
+            --progress=plain \
+            -t "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64" \
+            .
+
+      - name: Push amd64 image
+        run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
+
+  build-arm64:
+    needs: determine-versions
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.determine-versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          df -h
+
+      - name: Prepare build cache directory
+        run: mkdir -p .build-cache
+
+      - name: Build arm64 image
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            --build-arg OCP_VERSION="${{ matrix.ocp_version }}" \
+            --build-arg CRC_VERSION="${{ matrix.crc_version }}" \
+            --label "ocp_version=${{ matrix.ocp_version }}" \
+            --label "crc_version=${{ matrix.crc_version }}" \
+            --progress=plain \
+            -t "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64" \
+            .
+
+      - name: Push arm64 image
+        run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
+
+  create-manifest:
+    needs:
+      - determine-versions
+      - build-amd64
+      - build-arm64
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.determine-versions.outputs.matrix) }}
+    steps:
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Create and push OCP version manifest
+        run: |
+          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
+
+          docker manifest create "${OCP_TAG}" \
+            "${OCP_TAG}-amd64" \
+            "${OCP_TAG}-arm64"
+
+          docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
+          docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
+
+          docker manifest push "${OCP_TAG}"
+          echo "Pushed ${OCP_TAG}"
+
+      - name: Create and push CRC version manifest
+        run: |
+          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
+          CRC_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.crc_version }}"
+
+          docker manifest create "${CRC_TAG}" \
+            "${OCP_TAG}-amd64" \
+            "${OCP_TAG}-arm64"
+
+          docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
+          docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
+
+          docker manifest push "${CRC_TAG}"
+          echo "Pushed ${CRC_TAG}"

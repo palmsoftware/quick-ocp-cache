@@ -109,9 +109,9 @@ else
     test_fail "Binary missing or too small: $BINARY_SIZE bytes"
 fi
 
-# Test 7: Verify bundle exists and has reasonable size
-test_case "Verify CRC bundle exists and has reasonable size"
-BUNDLE_SIZE=$(docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" stat -c%s /cache/bundle.crcbundle 2>/dev/null || docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" stat -f%z /cache/bundle.crcbundle 2>/dev/null)
+# Test 7: Verify bundle tar exists and has reasonable size
+test_case "Verify CRC bundle tar exists and has reasonable size"
+BUNDLE_SIZE=$(docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" stat -c%s /cache/bundle.tar 2>/dev/null || docker run --rm --platform "linux/${ARCHITECTURE}" "$IMAGE_TAG" stat -f%z /cache/bundle.tar 2>/dev/null)
 if [ -n "$BUNDLE_SIZE" ] && [ "$BUNDLE_SIZE" -gt 1073741824 ]; then  # > 1 GB
     echo -e "  Bundle Size: ${GREEN}$(numfmt --to=iec-i --suffix=B $BUNDLE_SIZE)${NC}"
     test_pass
@@ -140,11 +140,14 @@ trap cleanup_container EXIT
 
 if docker cp "$CONTAINER_ID:/cache/crc-binary.tar.xz" "$TEMP_DIR/crc.tar.xz" && \
    [ -f "$TEMP_DIR/crc.tar.xz" ] && \
-   [ $(stat -c%s "$TEMP_DIR/crc.tar.xz" 2>/dev/null || stat -f%z "$TEMP_DIR/crc.tar.xz") -gt 10485760 ]; then
+   [ $(stat -c%s "$TEMP_DIR/crc.tar.xz" 2>/dev/null || stat -f%z "$TEMP_DIR/crc.tar.xz") -gt 10485760 ] && \
+   docker cp "$CONTAINER_ID:/cache/bundle.tar" "$TEMP_DIR/bundle.tar" && \
+   [ -f "$TEMP_DIR/bundle.tar" ] && \
+   tar -tf "$TEMP_DIR/bundle.tar" | grep -q '\.crcbundle$'; then
     echo -e "  Extracted to: ${GREEN}$TEMP_DIR${NC}"
     test_pass
 else
-    test_fail "Failed to extract binary"
+    test_fail "Failed to extract binary or bundle tar"
 fi
 
 # Test 10: Verify image labels
