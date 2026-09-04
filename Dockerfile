@@ -7,7 +7,7 @@ FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi-minimal:lates
 ARG OCP_VERSION
 ARG TARGETARCH
 ARG CRC_VERSION
-ARG CRC_MIRROR_URL=https://developers.redhat.com/content-gateway/rest/mirror/pub/openshift-v4/clients/crc
+ARG CRC_MIRROR_URL=https://mirror.openshift.com/pub/openshift-v4/clients/crc
 ARG BUNDLE_MIRROR_URL=https://mirror.openshift.com/pub/openshift-v4/clients/crc/bundles/openshift
 
 # Install dependencies (curl will replace curl-minimal automatically)
