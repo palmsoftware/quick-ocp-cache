@@ -9,6 +9,11 @@ on:
         description: 'Single OCP version to build (leave empty to build all from pins)'
         required: false
         default: ''
+      force_rebuild:
+        description: 'Rebuild even if image already exists in registry'
+        required: false
+        default: 'false'
+        type: boolean
   push:
     branches:
       - main
@@ -78,15 +83,31 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
+      - name: Check if amd64 image already exists
+        id: check
+        run: |
+          ARCH_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "${ARCH_TAG}" > /dev/null 2>&1; then
+            echo "Image ${ARCH_TAG} already exists — skipping build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Free disk space
+        if: steps.check.outputs.skip != 'true'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
           df -h
 
       - name: Prepare build cache directory
+        if: steps.check.outputs.skip != 'true'
         run: mkdir -p .build-cache
 
       - name: Build amd64 image
+        if: steps.check.outputs.skip != 'true'
         run: |
           docker build \
             --platform linux/amd64 \
@@ -99,6 +120,7 @@ jobs:
             .
 
       - name: Push amd64 image
+        if: steps.check.outputs.skip != 'true'
         run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
 
   build-arm64:
@@ -118,15 +140,31 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
+      - name: Check if arm64 image already exists
+        id: check
+        run: |
+          ARCH_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "${ARCH_TAG}" > /dev/null 2>&1; then
+            echo "Image ${ARCH_TAG} already exists — skipping build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Free disk space
+        if: steps.check.outputs.skip != 'true'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
           df -h
 
       - name: Prepare build cache directory
+        if: steps.check.outputs.skip != 'true'
         run: mkdir -p .build-cache
 
       - name: Build arm64 image
+        if: steps.check.outputs.skip != 'true'
         run: |
           docker build \
             --platform linux/arm64 \
@@ -139,6 +177,7 @@ jobs:
             .
 
       - name: Push arm64 image
+        if: steps.check.outputs.skip != 'true'
         run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
 
   create-manifest:
@@ -159,7 +198,21 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
+      - name: Check if manifest already exists
+        id: check
+        run: |
+          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "${OCP_TAG}" > /dev/null 2>&1; then
+            echo "Manifest ${OCP_TAG} already exists — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create and push OCP version manifest
+        if: steps.check.outputs.skip != 'true'
         run: |
           OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
 
@@ -174,6 +227,7 @@ jobs:
           echo "Pushed ${OCP_TAG}"
 
       - name: Create and push CRC version manifest
+        if: steps.check.outputs.skip != 'true'
         run: |
           OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
           CRC_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.crc_version }}"
