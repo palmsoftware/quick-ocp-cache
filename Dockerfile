@@ -1,12 +1,15 @@
 # Multi-stage Dockerfile for caching CRC binary and bundle
 # Supports multiple OCP versions and architectures
-# Usage: docker build --build-arg OCP_VERSION=4.19 -t quick-ocp-cache:4.19 .
+# Usage: docker build --build-arg OCP_VERSION=4.20 -t quick-ocp-cache:4.20 .
+# CI also passes BUNDLE_VERSION (the exact OpenShift z-version embedded in the
+# CRC release, e.g. 4.20.5) so the bundle matches what `crc setup` expects.
 
 FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi-minimal:latest AS downloader
 
 ARG OCP_VERSION
 ARG TARGETARCH
 ARG CRC_VERSION
+ARG BUNDLE_VERSION
 ARG CRC_MIRROR_URL=https://mirror.openshift.com/pub/openshift-v4/clients/crc
 ARG BUNDLE_MIRROR_URL=https://mirror.openshift.com/pub/openshift-v4/clients/crc/bundles/openshift
 
@@ -83,7 +86,25 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
         BUNDLE_FOUND=true; \
     fi && \
     \
-    # If no local bundle, download from mirror
+    # Exact version match: download the bundle for the OpenShift z-version
+    # embedded in the pinned CRC release (BUNDLE_VERSION, passed by CI after
+    # resolving the release name, e.g. "2.57.0-4.20.5"). Linux images use
+    # libvirt bundles on both architectures. A download failure fails the
+    # build on purpose: silently falling back to a different z-version would
+    # drift from the pinned CRC binary, which is the bug this fixes.
+    if [ "$BUNDLE_FOUND" = false ] && [ -n "${BUNDLE_VERSION}" ]; then \
+        echo "Using exact bundle version ${BUNDLE_VERSION} (matches CRC ${CRC_VERSION})" && \
+        BUNDLE_FILE="crc_libvirt_${BUNDLE_VERSION}_${TARGETARCH}.crcbundle" && \
+        curl -L -f --retry 3 --retry-delay 5 \
+            -o "/cache/bundle.crcbundle" \
+            "${BUNDLE_MIRROR_URL}/${BUNDLE_VERSION}/${BUNDLE_FILE}" && \
+        echo "${BUNDLE_FILE}" > /cache/bundle_name.txt && \
+        echo "${BUNDLE_VERSION}" > /cache/bundle_version.txt && \
+        BUNDLE_FOUND=true; \
+    fi && \
+    \
+    # If no local bundle and no exact version, discover the latest patch on
+    # the mirror (local builds without BUNDLE_VERSION)
     if [ "$BUNDLE_FOUND" = false ]; then \
         # Try new bundle location first - find latest patch version for this OCP major.minor
         echo "No local bundle found, downloading from mirror..." && \
@@ -125,7 +146,8 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
             fi; \
         fi && \
         \
-        echo "${BUNDLE_FILE}" > /cache/bundle_name.txt; \
+        echo "${BUNDLE_FILE}" > /cache/bundle_name.txt && \
+        echo "${LATEST_PATCH}" > /cache/bundle_version.txt; \
     fi && \
     \
     # Final check
@@ -148,10 +170,12 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
     BINARY_NAME=$(cat /cache/binary_name.txt) && \
     BUNDLE_NAME=$(cat /cache/bundle_name.txt) && \
     ARCH_NAME=$(cat /cache/arch_name.txt) && \
+    BUNDLE_VERSION=$(cat /cache/bundle_version.txt 2>/dev/null || echo "${BUNDLE_VERSION:-}") && \
     cat > /cache/metadata.json <<EOF
 {
   "ocp_version": "${OCP_VERSION}",
   "crc_version": "${CRC_VERSION}",
+  "bundle_version": "${BUNDLE_VERSION}",
   "architecture": "${TARGETARCH}",
   "binary_name": "${BINARY_NAME}",
   "bundle_name": "${BUNDLE_NAME}",
@@ -159,7 +183,7 @@ RUN CRC_VERSION=$(cat /cache/crc_version.txt) && \
   "bundle_size": $(stat -c%s /cache/bundle.tar 2>/dev/null || stat -f%z /cache/bundle.tar),
   "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "mirror_url": "${CRC_MIRROR_URL}/${CRC_VERSION}",
-  "bundle_url": "${BUNDLE_MIRROR_URL}/${OCP_VERSION}"
+  "bundle_url": "${BUNDLE_MIRROR_URL}/${BUNDLE_VERSION}"
 }
 EOF
 
@@ -174,10 +198,14 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 ARG OCP_VERSION
 ARG TARGETARCH
+ARG CRC_VERSION
+ARG BUNDLE_VERSION
 
 LABEL name="quick-ocp-cache" \
       ocp_version="${OCP_VERSION}" \
       architecture="${TARGETARCH}" \
+      crc_version="${CRC_VERSION}" \
+      bundle_version="${BUNDLE_VERSION}" \
       description="Cached CRC binary and bundle for OCP ${OCP_VERSION}" \
       maintainer="Brandon Palm <bpalm@redhat.com>" \
       source="https://github.com/palmsoftware/quick-ocp-cache"

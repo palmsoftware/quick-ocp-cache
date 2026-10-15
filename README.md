@@ -28,8 +28,8 @@ This repository provides a reliable failover mechanism for downloading CRC binar
 git clone https://github.com/palmsoftware/quick-ocp-cache.git
 cd quick-ocp-cache
 
-# Download CRC from cache (OpenShift 4.19)
-./scripts/download-from-cache.sh 4.19
+# Download CRC from cache (OpenShift 4.20)
+./scripts/download-from-cache.sh 4.20
 
 # Verify installation
 crc version
@@ -46,22 +46,22 @@ crc start
 gh secret set QUAY_USERNAME  # Enter: username+robotname
 gh secret set QUAY_TOKEN     # Paste your robot token
 
-# 2. Build cache for OCP 4.19
-gh workflow run build-crc-cache.yml -f ocp_version=4.19
+# 2. Build cache for OCP 4.20
+gh workflow run build-cache.yml -f ocp_version=4.20
 
 # 3. Watch the build
 gh run watch
 
 # 4. Test the cache
-./scripts/test-cache.sh 4.19
+./scripts/test-cache.sh 4.20
 ```
 
 ## ✨ Features
 
-- **🔄 Automatic Nightly Builds** - GitHub Actions workflow builds fresh cache images nightly
+- **🔄 Automatic Weekly Builds** - GitHub Actions workflow rebuilds cache images every Sunday at 02:00 UTC
 - **🏗️ Multi-Architecture Support** - Supports both `amd64` and `arm64` (Apple Silicon)
-- **🎯 Version-Specific Caches** - Separate images for each OpenShift version (4.18, 4.19, 4.20, etc.)
-- **🧠 Smart Rebuilds** - Only rebuilds when CRC version changes, saving time and resources
+- **🎯 Version-Specific Caches** - Separate images for each OpenShift version pinned in quick-ocp (4.18, 4.20, 4.21, 4.22)
+- **🧠 Drift-Aware Rebuilds** - Compares each registry image's `crc_version`/`bundle_version` labels against the current pins and rebuilds only on drift
 - **📦 Complete Package** - Includes both CRC binary and corresponding OpenShift bundle
 - **🔍 Rich Metadata** - JSON metadata with versions, sizes, URLs, and build timestamps
 - **🛡️ Failover Ready** - Easy integration into GitHub Actions as a fallback mechanism
@@ -70,12 +70,19 @@ gh run watch
 
 All images are hosted at: **`quay.io/bapalm/quick-ocp-cache`**
 
-| Tag | OCP Version | CRC Version | Architectures |
-|-----|-------------|-------------|---------------|
-| `4.18` | 4.18 | [2.51.0](https://github.com/crc-org/crc/releases/tag/v2.51.0) | amd64, arm64 |
-| `4.19` | 4.19 | [2.54.0](https://github.com/crc-org/crc/releases/tag/v2.54.0) | amd64, arm64 |
-| `4.20` | 4.20 | [2.56.0](https://github.com/crc-org/crc/releases/tag/v2.56.0) | amd64, arm64 |
-| `latest` | 4.20 | 2.56.0 | amd64, arm64 |
+| Tag | OCP Version | Architectures |
+|-----|-------------|---------------|
+| `4.18` | 4.18 | amd64, arm64 |
+| `4.20` | 4.20 | amd64, arm64 |
+| `4.21` | 4.21 | amd64, arm64 |
+| `4.22` | 4.22 | amd64, arm64 |
+
+The CRC version (and exact bundle z-version) each tag carries follows
+[quick-ocp's `crc-version-pins.json`](https://github.com/palmsoftware/quick-ocp/blob/main/crc-version-pins.json)
+and is resolved at build time — check `/cache/metadata.json` or the image
+labels (`crc_version`, `bundle_version`) for what a given tag currently holds.
+Arch-specific tags (`4.20-amd64`, `4.20-arm64`) and a CRC-version-named tag
+(e.g. `2.57.0`) are also published for each entry. There is no `latest` tag.
 
 ### Image Contents
 
@@ -84,8 +91,8 @@ Each cache image contains:
 ```
 /cache/
 ├── crc-binary.tar.xz      # CRC binary archive
-├── bundle.crcbundle        # CRC OpenShift bundle
-├── metadata.json           # Build metadata
+├── bundle.tar             # OpenShift bundle, tar-wrapped to preserve the versioned filename
+├── metadata.json           # Build metadata (includes bundle_version)
 ├── crc_version.txt         # CRC version string
 ├── bundle_name.txt         # Original bundle filename
 ├── binary_name.txt         # Original binary filename
@@ -95,20 +102,27 @@ Each cache image contains:
 
 ## 🏗️ How It Works
 
-### Build Process (Nightly)
+### Build Process (Weekly)
 
 ```mermaid
 graph LR
-    A[GitHub Actions] --> B[Check OCP Versions]
-    B --> C[Determine CRC Version]
-    C --> D[Check Existing Image]
+    A[GitHub Actions] --> B[Read quick-ocp crc-version-pins.json]
+    B --> C[Resolve CRC release per minor]
+    C --> D[Compare registry image labels]
     D --> E{Rebuild Needed?}
     E -->|Yes| F[Download from Mirror]
     E -->|No| G[Skip]
     F --> H[Build Multi-Arch Image]
     H --> I[Push to Quay.io]
-    I --> J[Verify Image]
+    I --> J[Re-point manifest tags]
 ```
+
+Each pinned minor is resolved the same way quick-ocp resolves it at runtime
+(per-minor, newest CRC release by published date), and the exact bundle
+z-version embedded in that release is downloaded — so the bundle always
+matches the CRC binary in the same image. An existing tag is only skipped
+when its `crc_version`/`bundle_version` labels already match the pins;
+otherwise it is rebuilt.
 
 ### Failover Usage
 
@@ -174,15 +188,20 @@ gh secret set QUAY_TOKEN
 
 ### Step 3: Configure OCP Versions
 
-Edit `ocp-versions.json` to specify which OpenShift versions to cache:
+There is no version list in this repository — the build workflow reads
+[quick-ocp's `crc-version-pins.json`](https://github.com/palmsoftware/quick-ocp/blob/main/crc-version-pins.json)
+and builds an image for every pinned minor (excluding the `latest` pointer).
+To change which versions get built, edit the pins in quick-ocp.
 
 ```json
 {
-  "versions": [
-    "4.18",
-    "4.19",
-    "4.20"
-  ]
+  "version_pins": {
+    "4.18": "auto",
+    "4.20": "auto",
+    "4.21": "auto",
+    "4.22": "auto",
+    "latest": "auto"
+  }
 }
 ```
 
@@ -190,13 +209,13 @@ Edit `ocp-versions.json` to specify which OpenShift versions to cache:
 
 ```bash
 # Build all configured versions
-gh workflow run build-crc-cache.yml
+gh workflow run build-cache.yml
 
 # Or build a specific version
-gh workflow run build-crc-cache.yml -f ocp_version=4.19
+gh workflow run build-cache.yml -f ocp_version=4.20
 
-# Force rebuild even if image exists
-gh workflow run build-crc-cache.yml -f ocp_version=4.19 -f force_rebuild=true
+# Force rebuild even if the image is current
+gh workflow run build-cache.yml -f ocp_version=4.20 -f force_rebuild=true
 
 # Monitor the workflow
 gh run watch
@@ -206,57 +225,48 @@ gh run watch
 
 ```bash
 # Pull the image
-docker pull quay.io/bapalm/quick-ocp-cache:4.19
+docker pull quay.io/bapalm/quick-ocp-cache:4.20
 
 # View metadata
-docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 cat /cache/metadata.json | jq .
+docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 cat /cache/metadata.json | jq .
 
 # Run the test suite
-./scripts/test-cache.sh 4.19
+./scripts/test-cache.sh 4.20
 
 # Test both architectures
-./scripts/test-cache.sh 4.19 amd64
-./scripts/test-cache.sh 4.19 arm64
+./scripts/test-cache.sh 4.20 amd64
+./scripts/test-cache.sh 4.20 arm64
 ```
 
 ### Adding New OCP Versions
 
-1. Update `ocp-versions.json`:
-   ```json
-   {
-     "versions": ["4.18", "4.19", "4.20", "4.21"]
-   }
-   ```
+Image builds are driven by
+[quick-ocp's `crc-version-pins.json`](https://github.com/palmsoftware/quick-ocp/blob/main/crc-version-pins.json) —
+this repository has no version list of its own. To add a new minor:
 
-2. Update the Dockerfile CRC version mapping:
-   ```dockerfile
-   case "${OCP_VERSION}" in \
-       "4.18") CRC_VERSION="2.51.0" ;; \
-       "4.19") CRC_VERSION="2.54.0" ;; \
-       "4.20") CRC_VERSION="2.56.0" ;; \
-       "4.21") CRC_VERSION="2.58.0" ;; \
-       *) echo "Fetching latest..." ;; \
-   esac
-   ```
-
-3. Commit and build:
+1. Add the minor to `version_pins` in quick-ocp's `crc-version-pins.json`
+   (e.g. `"4.23": "auto"`), or pin a specific CRC version there.
+2. Wait for (or trigger) the next build — the weekly schedule and every push
+   to this repo's main build all pinned minors:
    ```bash
-   git add ocp-versions.json Dockerfile
-   git commit -m "Add OCP 4.21 support"
-   git push
-   gh workflow run build-crc-cache.yml -f ocp_version=4.21
+   gh workflow run build-cache.yml -f ocp_version=4.23
    ```
+
+No Dockerfile change is needed: the workflow resolves the CRC release for the
+minor (the same way quick-ocp does at runtime) and passes `CRC_VERSION` and
+`BUNDLE_VERSION` as build args. Until a CRC release serves the new minor, the
+build skips it with a warning.
 
 ## 📖 Usage Examples
 
 ### Using the Download Script
 
 ```bash
-# Download and install CRC from cache (OCP 4.19)
-./scripts/download-from-cache.sh 4.19
+# Download and install CRC from cache (OCP 4.20)
+./scripts/download-from-cache.sh 4.20
 
 # Specify architecture (default: amd64)
-./scripts/download-from-cache.sh 4.19 quay.io arm64
+./scripts/download-from-cache.sh 4.20 quay.io arm64
 
 # Verify installation
 crc version
@@ -266,20 +276,20 @@ crc version
 
 ```bash
 # Pull the cache image
-docker pull quay.io/bapalm/quick-ocp-cache:4.19
+docker pull quay.io/bapalm/quick-ocp-cache:4.20
 
 # View metadata
-docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 cat /cache/metadata.json
+docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 cat /cache/metadata.json
 
 # Create a container
-CONTAINER_ID=$(docker create quay.io/bapalm/quick-ocp-cache:4.19)
+CONTAINER_ID=$(docker create quay.io/bapalm/quick-ocp-cache:4.20)
 
 # Extract CRC binary
 docker cp $CONTAINER_ID:/cache/crc-binary.tar.xz ./crc.tar.xz
 tar -xvf crc.tar.xz
 
 # Extract bundle (optional)
-BUNDLE_NAME=$(docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 cat /cache/bundle_name.txt)
+BUNDLE_NAME=$(docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 cat /cache/bundle_name.txt)
 docker cp $CONTAINER_ID:/cache/bundle.crcbundle ./$BUNDLE_NAME
 
 # Install CRC
@@ -302,7 +312,7 @@ docker rm $CONTAINER_ID
          -o crc.tar.xz \
          https://developers.redhat.com/content-gateway/rest/mirror/pub/openshift-v4/clients/crc/2.54.0/crc-linux-amd64.tar.xz; then
       echo "Primary mirror failed, using Quay cache..."
-      ./scripts/download-from-cache.sh 4.19
+      ./scripts/download-from-cache.sh 4.20
     else
       tar -xvf crc.tar.xz
       sudo mv crc-linux-*/crc /usr/local/bin/
@@ -322,7 +332,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ocp_version: ["4.18", "4.19", "4.20"]
+        ocp_version: ["4.18", "4.20", "4.21"]
     
     steps:
       - name: Checkout
@@ -332,11 +342,14 @@ jobs:
         env:
           OCP_VERSION: ${{ matrix.ocp_version }}
         run: |
-          # Determine CRC version from OCP version
+          # Resolve the CRC release serving this OCP minor. These move over
+          # time — in real use, resolve them the same way quick-ocp does
+          # (from crc-version-pins.json and the crc release list) instead of
+          # hardcoding.
           case "$OCP_VERSION" in
             "4.18") CRC_VERSION="2.51.0" ;;
-            "4.19") CRC_VERSION="2.54.0" ;;
-            "4.20") CRC_VERSION="2.56.0" ;;
+            "4.20") CRC_VERSION="2.57.0" ;;
+            "4.21") CRC_VERSION="2.61.0" ;;
           esac
           
           # Try primary mirror
@@ -368,7 +381,7 @@ Use as a reliable fallback when setting up CRC in CI:
   run: |
     if ! ./scripts/download-crc-primary.sh; then
       echo "Primary mirror unavailable, using cache"
-      ./scripts/download-from-cache.sh 4.19
+      ./scripts/download-from-cache.sh 4.20
     fi
 ```
 
@@ -378,10 +391,10 @@ Keep a local copy for offline development:
 
 ```bash
 # Pull image for offline use
-docker pull quay.io/bapalm/quick-ocp-cache:4.19
+docker pull quay.io/bapalm/quick-ocp-cache:4.20
 
 # Later, when offline:
-./scripts/download-from-cache.sh 4.19
+./scripts/download-from-cache.sh 4.20
 ```
 
 #### 3. Airgapped Environments
@@ -390,13 +403,13 @@ Transfer images to airgapped environments:
 
 ```bash
 # Save image to tarball
-docker save quay.io/bapalm/quick-ocp-cache:4.19 -o crc-cache-4.19.tar
+docker save quay.io/bapalm/quick-ocp-cache:4.20 -o crc-cache-4.20.tar
 
 # Transfer to airgapped system, then load:
-docker load -i crc-cache-4.19.tar
+docker load -i crc-cache-4.20.tar
 
 # Extract files
-./scripts/download-from-cache.sh 4.19 localhost
+./scripts/download-from-cache.sh 4.20 localhost
 ```
 
 #### 4. Quick Version Switching
@@ -404,8 +417,8 @@ docker load -i crc-cache-4.19.tar
 Rapidly switch between OCP versions:
 
 ```bash
-# Test with OCP 4.19
-./scripts/download-from-cache.sh 4.19
+# Test with OCP 4.20
+./scripts/download-from-cache.sh 4.20
 crc setup
 crc start
 
@@ -425,12 +438,12 @@ crc start
 
 ```bash
 # Build for your current platform (works with docker or podman)
-docker build --build-arg OCP_VERSION=4.19 -t quick-ocp-cache:4.19 .
+docker build --build-arg OCP_VERSION=4.20 -t quick-ocp-cache:4.20 .
 # or
-podman build --build-arg OCP_VERSION=4.19 -t quick-ocp-cache:4.19 .
+podman build --build-arg OCP_VERSION=4.20 -t quick-ocp-cache:4.20 .
 
 # Test the image
-docker run --rm quick-ocp-cache:4.19 cat /cache/metadata.json
+docker run --rm quick-ocp-cache:4.20 cat /cache/metadata.json
 ```
 
 ### Production Build (Multi-Architecture)
@@ -439,10 +452,10 @@ Using the provided script (auto-detects docker/podman):
 
 ```bash
 # Build single version locally (for testing)
-./scripts/build-local.sh 4.19 --multi-arch
+./scripts/build-local.sh 4.20 --multi-arch
 
 # Build and push to Quay.io
-./scripts/build-local.sh 4.19 --multi-arch --push
+./scripts/build-local.sh 4.20 --multi-arch --push
 
 # Build all versions and push
 ./scripts/build-local.sh --all --multi-arch --push
@@ -452,21 +465,21 @@ Using the provided script (auto-detects docker/podman):
 
 The build script automatically reuses CRC bundles from your local `~/.crc/cache` directory:
 
-- If you already have CRC bundles (e.g., `crc_vfkit_4.19.8_arm64.crcbundle`), they'll be used instead of downloading
+- If you already have CRC bundles (e.g., `crc_vfkit_4.20.8_arm64.crcbundle`), they'll be used instead of downloading
 - Downloaded bundles are saved back to `~/.crc/cache` for reuse by CRC and future builds
 - Saves time and bandwidth by avoiding 5-6 GB downloads for bundles you already have
 
 Example workflow:
 ```bash
 # First build downloads bundles (~5 GB)
-./scripts/build-local.sh 4.19 --multi-arch
+./scripts/build-local.sh 4.20 --multi-arch
 
 # Second build reuses the same bundles (instant!)
-./scripts/build-local.sh 4.19 --multi-arch
+./scripts/build-local.sh 4.20 --multi-arch
 
 # Works with CRC's own cache too
 crc setup  # Downloads bundle to ~/.crc/cache
-./scripts/build-local.sh 4.19 --multi-arch  # Reuses that bundle!
+./scripts/build-local.sh 4.20 --multi-arch  # Reuses that bundle!
 ```
 
 Or manually with docker buildx or podman:
@@ -479,24 +492,24 @@ docker buildx create --name multiarch --use
 # Build and push
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg OCP_VERSION=4.19 \
-  -t quay.io/bapalm/quick-ocp-cache:4.19 \
+  --build-arg OCP_VERSION=4.20 \
+  -t quay.io/bapalm/quick-ocp-cache:4.20 \
   --push .
 ```
 
 **Podman:**
 ```bash
 # Build for both architectures
-podman build --platform linux/amd64 --build-arg OCP_VERSION=4.19 \
-  -t quay.io/bapalm/quick-ocp-cache:4.19-amd64 .
-podman build --platform linux/arm64 --build-arg OCP_VERSION=4.19 \
-  -t quay.io/bapalm/quick-ocp-cache:4.19-arm64 .
+podman build --platform linux/amd64 --build-arg OCP_VERSION=4.20 \
+  -t quay.io/bapalm/quick-ocp-cache:4.20-amd64 .
+podman build --platform linux/arm64 --build-arg OCP_VERSION=4.20 \
+  -t quay.io/bapalm/quick-ocp-cache:4.20-arm64 .
 
 # Create and push manifest
-podman manifest create quay.io/bapalm/quick-ocp-cache:4.19 \
-  quay.io/bapalm/quick-ocp-cache:4.19-amd64 \
-  quay.io/bapalm/quick-ocp-cache:4.19-arm64
-podman manifest push quay.io/bapalm/quick-ocp-cache:4.19
+podman manifest create quay.io/bapalm/quick-ocp-cache:4.20 \
+  quay.io/bapalm/quick-ocp-cache:4.20-amd64 \
+  quay.io/bapalm/quick-ocp-cache:4.20-arm64
+podman manifest push quay.io/bapalm/quick-ocp-cache:4.20
 ```
 
 ## 🧪 Testing
@@ -510,7 +523,7 @@ Before building cache images, verify the mirrors are accessible:
 ./scripts/test-mirror.sh
 
 # Test specific version
-./scripts/test-mirror.sh 4.19
+./scripts/test-mirror.sh 4.20
 ```
 
 ### Download Bundles to Local Cache
@@ -519,11 +532,11 @@ Pre-download CRC bundles for **both amd64 and arm64** to your local `~/.crc/cach
 
 ```bash
 # Download bundles for both architectures
-./scripts/download-bundle.sh 4.19
+./scripts/download-bundle.sh 4.20
 
 # Downloads both:
-# - crc_libvirt_4.19.x_amd64.crcbundle (~6GB)
-# - crc_vfkit_4.19.x_arm64.crcbundle (~6GB)
+# - crc_libvirt_4.20.x_amd64.crcbundle (~6GB)
+# - crc_vfkit_4.20.x_arm64.crcbundle (~6GB)
 ```
 
 This is useful for:
@@ -537,14 +550,14 @@ This is useful for:
 Run the comprehensive cache test suite:
 
 ```bash
-# Test default version (4.19) on amd64
+# Test default version (4.20) on amd64
 ./scripts/test-cache.sh
 
 # Test specific version
 ./scripts/test-cache.sh 4.20
 
 # Test specific version and architecture
-./scripts/test-cache.sh 4.19 arm64
+./scripts/test-cache.sh 4.20 arm64
 ```
 
 ### Manual Verification
@@ -554,13 +567,13 @@ Run the comprehensive cache test suite:
 docker images quay.io/bapalm/quick-ocp-cache
 
 # View all metadata
-docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 cat /cache/metadata.json | jq .
+docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 cat /cache/metadata.json | jq .
 
 # Check file sizes
-docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 ls -lh /cache/
+docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 ls -lh /cache/
 
 # Verify extraction script works
-docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 /cache/extract.sh /tmp/test
+docker run --rm quay.io/bapalm/quick-ocp-cache:4.20 /cache/extract.sh /tmp/test
 ```
 
 ## 🔧 Project Structure
@@ -568,16 +581,19 @@ docker run --rm quay.io/bapalm/quick-ocp-cache:4.19 /cache/extract.sh /tmp/test
 ```
 quick-ocp-cache/
 ├── Dockerfile                          # Parameterized multi-stage Dockerfile
-├── ocp-versions.json                   # OCP version configuration
+├── ocp-versions.json                   # Legacy config, unused by the build workflow
 ├── .github/
 │   └── workflows/
-│       └── build-crc-cache.yml        # Nightly build workflow
+│       ├── build-cache.yml             # Weekly build workflow (also runs on pushes to main)
+│       └── pre-main.yml                # Lint and pin validation on PRs/pushes
 ├── scripts/
-│   ├── download-from-cache.sh         # Failover download script
-│   ├── download-bundle.sh             # Download bundles to local cache
-│   ├── test-cache.sh                  # Cache image test suite
-│   ├── test-mirror.sh                 # Mirror availability test suite
-│   └── build-local.sh                 # Local build helper script
+│   ├── resolve-crc-release.sh          # Resolve the CRC release + bundle version for an OCP minor
+│   ├── check-image-drift.sh            # Compare registry image labels against desired versions
+│   ├── download-from-cache.sh          # Failover download script
+│   ├── download-bundle.sh              # Download bundles to local cache
+│   ├── test-cache.sh                   # Cache image test suite
+│   ├── test-mirror.sh                  # Mirror availability test suite
+│   └── build-local.sh                  # Local build helper script
 └── README.md                           # This file
 ```
 
@@ -585,20 +601,21 @@ quick-ocp-cache/
 
 The build workflow can be triggered in three ways:
 
-1. **Scheduled (Nightly):**
-   - Runs at 2 AM UTC every day
-   - Checks all configured OCP versions
-   - Only rebuilds if CRC version changed
+1. **Scheduled (Weekly):**
+   - Runs Sundays at 02:00 UTC
+   - Builds every minor pinned in quick-ocp's `crc-version-pins.json`
+   - Rebuilds an image only when its `crc_version`/`bundle_version` labels
+     no longer match the pins (drift-aware)
 
 2. **Manual (Build All):**
    ```bash
-   gh workflow run build-crc-cache.yml
+   gh workflow run build-cache.yml
    ```
 
 3. **Manual (Specific Version):**
    ```bash
-   gh workflow run build-crc-cache.yml -f ocp_version=4.19
-   gh workflow run build-crc-cache.yml -f ocp_version=4.19 -f force_rebuild=true
+   gh workflow run build-cache.yml -f ocp_version=4.20
+   gh workflow run build-cache.yml -f ocp_version=4.20 -f force_rebuild=true
    ```
 
 ## 🔧 Troubleshooting
@@ -622,10 +639,11 @@ docker login quay.io
 #### Image Size Too Large
 CRC bundles are typically 3-5 GB. This is expected. Quay.io free tier supports up to 10 GB of storage.
 
-#### Smart Rebuild Not Working
-Force a rebuild manually:
+#### Image Not Rebuilding After a Pin Change
+Force a rebuild manually (the weekly drift check should catch it, but this
+skips the label comparison):
 ```bash
-gh workflow run build-crc-cache.yml -f ocp_version=4.19 -f force_rebuild=true
+gh workflow run build-cache.yml -f ocp_version=4.20 -f force_rebuild=true
 ```
 
 ### Local Usage Issues
@@ -633,7 +651,7 @@ gh workflow run build-crc-cache.yml -f ocp_version=4.19 -f force_rebuild=true
 #### "Permission denied" installing CRC
 **Solution:** Ensure you have sudo access:
 ```bash
-sudo ./scripts/download-from-cache.sh 4.19
+sudo ./scripts/download-from-cache.sh 4.20
 ```
 
 #### "Failed to pull image"
@@ -651,7 +669,7 @@ docker pull hello-world
 docker login quay.io
 
 # Verify tag exists
-docker pull quay.io/bapalm/quick-ocp-cache:4.19
+docker pull quay.io/bapalm/quick-ocp-cache:4.20
 ```
 
 #### Downloaded binary doesn't run
@@ -661,7 +679,7 @@ docker pull quay.io/bapalm/quick-ocp-cache:4.19
 uname -m
 
 # Pull correct architecture
-docker pull --platform linux/$(uname -m) quay.io/bapalm/quick-ocp-cache:4.19
+docker pull --platform linux/$(uname -m) quay.io/bapalm/quick-ocp-cache:4.20
 ```
 
 #### Bundle not compatible with CRC version
@@ -673,7 +691,7 @@ docker pull --platform linux/$(uname -m) quay.io/bapalm/quick-ocp-cache:4.19
 
 ```bash
 # List recent workflow runs
-gh run list --workflow=build-crc-cache.yml
+gh run list --workflow=build-cache.yml
 
 # View logs for failed runs
 gh run view <run-id> --log-failed
@@ -686,15 +704,16 @@ gh run watch
 
 ### Regular Tasks
 
-1. **Monthly:** Review and update OCP versions
+1. **Monthly:** Review the minors pinned in quick-ocp's `crc-version-pins.json`
 2. **Quarterly:** Clean up old images in Quay.io
-3. **As needed:** Update CRC version mappings when new releases are available
+3. **As needed:** Nothing here — CRC versions are resolved from the pins at
+   build time; there are no version mappings to maintain in this repo
 
 ### Monitoring
 
 Check the GitHub Actions workflow runs:
 ```bash
-gh run list --workflow=build-crc-cache.yml
+gh run list --workflow=build-cache.yml
 ```
 
 View logs for failed runs:
@@ -740,9 +759,9 @@ Each cache image requires:
 ## 💡 Best Practices
 
 1. **Always try primary mirror first** - Use cache as fallback only
-2. **Pin to specific OCP versions** - Don't rely on `latest` in production
+2. **Pin to specific OCP minors** - There is no `latest` cache tag; matrix over the pinned minors you need
 3. **Test before deploying** - Run test suite after pulling new images
-4. **Monitor image freshness** - Check build dates in metadata
+4. **Monitor image freshness** - Check `crc_version`/`bundle_version` labels or metadata.json
 5. **Clean up old versions** - Remove unused local images to save space
 
 ## 🤝 Contributing
@@ -766,10 +785,10 @@ Contributions are welcome! Areas for improvement:
 ## 📊 Status
 
 - ✅ Multi-architecture support (amd64, arm64)
-- ✅ Smart rebuild detection
+- ✅ Drift-aware rebuild detection
 - ✅ Comprehensive test suite
 - ✅ Complete documentation
-- ✅ Nightly automated builds
+- ✅ Weekly automated builds
 - ✅ Metadata and versioning
 - ✅ GitHub Actions integration examples
 
