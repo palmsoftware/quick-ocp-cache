@@ -107,7 +107,9 @@ jobs:
             mv "${MATRIX_FILE}.tmp" "${MATRIX_FILE}"
           done <<< "${VERSIONS}"
 
-          echo "matrix=$(cat "${MATRIX_FILE}")" >> "$GITHUB_OUTPUT"
+          # GITHUB_OUTPUT key=value entries must be single-line — emit the
+          # matrix as compact JSON (jq's default output is pretty-printed).
+          echo "matrix=$(jq -c . "${MATRIX_FILE}")" >> "$GITHUB_OUTPUT"
           echo "Resolved matrix:"
           jq . "${MATRIX_FILE}"
 
