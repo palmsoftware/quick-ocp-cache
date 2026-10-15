@@ -10,7 +10,7 @@ on:
         required: false
         default: ''
       force_rebuild:
-        description: 'Rebuild even if image already exists in registry'
+        description: 'Rebuild even if the registry image is already current'
         required: false
         default: 'false'
         type: boolean
@@ -26,6 +26,9 @@ concurrency:
   group: build-cache-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: quay.io
   IMAGE: bapalm/quick-ocp-cache
@@ -37,34 +40,76 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Resolve versions from crc-version-pins.json
         id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           PINS=$(curl -fsSL "${{ env.PINS_URL }}")
 
-          # Resolve "auto" to the latest CRC release from GitHub
-          LATEST_CRC=$(curl -fsSL "https://api.github.com/repos/crc-org/crc/releases/latest" \
-            | jq -r '.tag_name | ltrimstr("v")')
-          echo "Latest CRC release: ${LATEST_CRC}"
+          # Fetch the release list once so every matrix cell resolves against
+          # the same data. resolve-crc-release.sh mirrors the runtime
+          # resolution in quick-ocp (per-minor, newest by published date) and
+          # returns "crc_version<TAB>bundle_version" — the bundle z-version is
+          # the one embedded in that CRC release.
+          export RELEASES_FILE=$(mktemp)
+          trap 'rm -f "${RELEASES_FILE}"' EXIT
+          curl -fsSL --retry 5 --retry-delay 3 \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/crc-org/crc/releases?per_page=100" > "${RELEASES_FILE}"
 
           if [ -n "${{ github.event.inputs.ocp_version }}" ]; then
             # Single version requested via workflow_dispatch
-            OCP="${{ github.event.inputs.ocp_version }}"
-            PIN=$(echo "${PINS}" | jq -r --arg v "${OCP}" '.version_pins[$v] // "auto"')
-            CRC=$([ "${PIN}" = "auto" ] && echo "${LATEST_CRC}" || echo "${PIN}")
-            MATRIX=$(jq -cn --arg ocp "${OCP}" --arg crc "${CRC}" '[{"ocp_version":$ocp,"crc_version":$crc}]')
+            VERSIONS="${{ github.event.inputs.ocp_version }}"
           else
             # All versions from pins (excluding "latest" which is a pointer, not a real OCP version)
-            MATRIX=$(echo "${PINS}" | jq -c --arg latest "${LATEST_CRC}" '
-              [.version_pins | to_entries[]
-               | select(.key != "latest")
-               | {ocp_version: .key, crc_version: (if .value == "auto" then $latest else .value end)}]
-            ')
+            VERSIONS=$(echo "${PINS}" | jq -r '.version_pins | keys[] | select(. != "latest")')
           fi
 
-          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+          MATRIX_FILE=$(mktemp)
+          echo "[]" > "${MATRIX_FILE}"
+
+          while IFS= read -r OCP; do
+            [ -n "${OCP}" ] || continue
+            PIN=$(echo "${PINS}" | jq -r --arg v "${OCP}" '.version_pins[$v] // "auto"')
+
+            if [ "${PIN}" = "auto" ]; then
+              RESOLVED=$(scripts/resolve-crc-release.sh --minor "${OCP}") \
+                || { echo "::error::Failed to resolve CRC release for OCP ${OCP}"; exit 1; }
+            else
+              RESOLVED=$(scripts/resolve-crc-release.sh --minor "${OCP}" --pin "${PIN}") \
+                || { echo "::error::Failed to resolve CRC release for OCP ${OCP}"; exit 1; }
+            fi
+            CRC=$(printf '%s' "${RESOLVED}" | cut -f1)
+            BUNDLE=$(printf '%s' "${RESOLVED}" | cut -f2)
+
+            if [ -z "${CRC}" ]; then
+              if [ "${PIN}" = "auto" ]; then
+                # No CRC release serves this minor yet — building an image
+                # anyway would embed a CRC binary for a different minor.
+                echo "::warning::No CRC release currently serves OCP ${OCP} — skipping image build for this minor"
+                continue
+              else
+                echo "::error::Pinned CRC ${PIN} does not exist or does not serve OCP ${OCP}"
+                exit 1
+              fi
+            fi
+
+            echo "OCP ${OCP}: pin=${PIN} crc=${CRC} bundle=${BUNDLE}"
+
+            jq --arg ocp "${OCP}" --arg crc "${CRC}" --arg bundle "${BUNDLE}" \
+              '. + [{ocp_version: $ocp, crc_version: $crc, bundle_version: $bundle}]' \
+              "${MATRIX_FILE}" > "${MATRIX_FILE}.tmp"
+            mv "${MATRIX_FILE}.tmp" "${MATRIX_FILE}"
+          done <<< "${VERSIONS}"
+
+          echo "matrix=$(cat "${MATRIX_FILE}")" >> "$GITHUB_OUTPUT"
           echo "Resolved matrix:"
-          echo "${MATRIX}" | jq .
+          jq . "${MATRIX_FILE}"
 
   build-amd64:
     needs: determine-versions
@@ -83,44 +128,43 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Check if amd64 image already exists
+      - name: Check if amd64 image needs rebuilding
         id: check
-        run: |
-          ARCH_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
-          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif docker manifest inspect "${ARCH_TAG}" > /dev/null 2>&1; then
-            echo "Image ${ARCH_TAG} already exists — skipping build"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+        env:
+          REPOSITORY: ${{ env.IMAGE }}
+          TAG: ${{ matrix.ocp_version }}-amd64
+          DESIRED_CRC_VERSION: ${{ matrix.crc_version }}
+          DESIRED_BUNDLE_VERSION: ${{ matrix.bundle_version }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: scripts/check-image-drift.sh
 
       - name: Free disk space
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
           df -h
 
       - name: Prepare build cache directory
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: mkdir -p .build-cache
 
       - name: Build amd64 image
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: |
           docker build \
             --platform linux/amd64 \
             --build-arg OCP_VERSION="${{ matrix.ocp_version }}" \
             --build-arg CRC_VERSION="${{ matrix.crc_version }}" \
+            --build-arg BUNDLE_VERSION="${{ matrix.bundle_version }}" \
             --label "ocp_version=${{ matrix.ocp_version }}" \
             --label "crc_version=${{ matrix.crc_version }}" \
+            --label "bundle_version=${{ matrix.bundle_version }}" \
             --progress=plain \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64" \
             .
 
       - name: Push amd64 image
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
 
   build-arm64:
@@ -140,46 +184,48 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Check if arm64 image already exists
+      - name: Check if arm64 image needs rebuilding
         id: check
-        run: |
-          ARCH_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
-          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif docker manifest inspect "${ARCH_TAG}" > /dev/null 2>&1; then
-            echo "Image ${ARCH_TAG} already exists — skipping build"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+        env:
+          REPOSITORY: ${{ env.IMAGE }}
+          TAG: ${{ matrix.ocp_version }}-arm64
+          DESIRED_CRC_VERSION: ${{ matrix.crc_version }}
+          DESIRED_BUNDLE_VERSION: ${{ matrix.bundle_version }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: scripts/check-image-drift.sh
 
       - name: Free disk space
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
           df -h
 
       - name: Prepare build cache directory
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: mkdir -p .build-cache
 
       - name: Build arm64 image
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: |
           docker build \
             --platform linux/arm64 \
             --build-arg OCP_VERSION="${{ matrix.ocp_version }}" \
             --build-arg CRC_VERSION="${{ matrix.crc_version }}" \
+            --build-arg BUNDLE_VERSION="${{ matrix.bundle_version }}" \
             --label "ocp_version=${{ matrix.ocp_version }}" \
             --label "crc_version=${{ matrix.crc_version }}" \
+            --label "bundle_version=${{ matrix.bundle_version }}" \
             --progress=plain \
             -t "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64" \
             .
 
       - name: Push arm64 image
-        if: steps.check.outputs.skip != 'true'
+        if: steps.check.outputs.rebuilt == 'true'
         run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
 
+  # Manifest lists are cheap to re-create (registry API calls only, no image
+  # pulls), so this always runs and re-points each tag at the current arch
+  # manifests — no skip logic that could freeze a stale manifest in place.
   create-manifest:
     needs:
       - determine-versions
@@ -198,21 +244,7 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Check if manifest already exists
-        id: check
-        run: |
-          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
-          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif docker manifest inspect "${OCP_TAG}" > /dev/null 2>&1; then
-            echo "Manifest ${OCP_TAG} already exists — skipping"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create and push OCP version manifest
-        if: steps.check.outputs.skip != 'true'
         run: |
           OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
 
@@ -227,7 +259,6 @@ jobs:
           echo "Pushed ${OCP_TAG}"
 
       - name: Create and push CRC version manifest
-        if: steps.check.outputs.skip != 'true'
         run: |
           OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
           CRC_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.crc_version }}"

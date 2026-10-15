@@ -7,9 +7,13 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   PINS_URL: https://raw.githubusercontent.com/palmsoftware/quick-ocp/main/crc-version-pins.json
   CRC_MIRROR_URL: https://mirror.openshift.com/pub/openshift-v4/clients/crc
+  BUNDLE_MIRROR_URL: https://mirror.openshift.com/pub/openshift-v4/clients/crc/bundles/openshift
 
 jobs:
   lint:
@@ -29,20 +33,27 @@ jobs:
   validate-pins:
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+
       - name: Fetch and validate crc-version-pins.json
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Fetching pins from palmsoftware/quick-ocp..."
           PINS=$(curl -fsSL "${{ env.PINS_URL }}")
           echo "${PINS}" | jq .
 
-          # Resolve "auto" to latest CRC release once
-          LATEST_CRC=$(curl -fsSL "https://api.github.com/repos/crc-org/crc/releases/latest" \
-            | jq -r '.tag_name | ltrimstr("v")')
-          echo ""
-          echo "Latest CRC release: ${LATEST_CRC}"
-          echo ""
+          # Fetch the release list once; resolve-crc-release.sh reuses it for
+          # every version. It resolves each minor the same way quick-ocp does
+          # at runtime (per-minor, newest by published date) and also returns
+          # the exact bundle z-version embedded in that CRC release.
+          export RELEASES_FILE=$(mktemp)
+          trap 'rm -f "${RELEASES_FILE}"' EXIT
+          curl -fsSL --retry 5 --retry-delay 3 \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/crc-org/crc/releases?per_page=100" > "${RELEASES_FILE}"
 
           FAILED=0
           SUMMARY=""
@@ -50,30 +61,37 @@ jobs:
           # Iterate all OCP version keys except "latest"
           while IFS= read -r OCP_VER; do
             PIN=$(echo "${PINS}" | jq -r --arg v "${OCP_VER}" '.version_pins[$v]')
+
             if [ "${PIN}" = "auto" ]; then
-              CRC_VER="${LATEST_CRC}"
+              RESOLVED=$(scripts/resolve-crc-release.sh --minor "${OCP_VER}") \
+                || { echo "::error::Failed to resolve CRC release for OCP ${OCP_VER}"; exit 1; }
             else
-              CRC_VER="${PIN}"
+              RESOLVED=$(scripts/resolve-crc-release.sh --minor "${OCP_VER}" --pin "${PIN}") \
+                || { echo "::error::Failed to resolve CRC release for OCP ${OCP_VER}"; exit 1; }
             fi
+            CRC_VER=$(printf '%s' "${RESOLVED}" | cut -f1)
+            BUNDLE_VER=$(printf '%s' "${RESOLVED}" | cut -f2)
 
-            echo "=== OCP ${OCP_VER} → CRC ${CRC_VER} (pin: ${PIN}) ==="
-            SUMMARY="${SUMMARY}  OCP ${OCP_VER} → CRC ${CRC_VER}\n"
+            echo "=== OCP ${OCP_VER} → CRC ${CRC_VER} (pin: ${PIN}, bundle: ${BUNDLE_VER}) ==="
 
-            # 1. Verify the CRC release tag exists on GitHub (skip for "auto" — latest already confirmed)
-            if [ "${PIN}" != "auto" ]; then
-              HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" \
-                "https://api.github.com/repos/crc-org/crc/releases/tags/v${CRC_VER}")
-              if [ "${HTTP_STATUS}" = "200" ]; then
-                echo "  ✓ CRC release v${CRC_VER} exists on GitHub"
+            if [ -z "${CRC_VER}" ]; then
+              if [ "${PIN}" = "auto" ]; then
+                # Not a build blocker: no image is built for this minor until a
+                # CRC release serves it.
+                echo "::warning::No CRC release currently serves OCP ${OCP_VER} — no cache image will be built for it"
+                SUMMARY="${SUMMARY}  OCP ${OCP_VER} → (no CRC release serves this minor yet)\n"
               else
-                echo "  ✗ CRC release v${CRC_VER} NOT found on GitHub (HTTP ${HTTP_STATUS})"
+                echo "  ✗ Pinned CRC ${PIN} does not exist or does not serve OCP ${OCP_VER}"
+                SUMMARY="${SUMMARY}  OCP ${OCP_VER} → INVALID PIN ${PIN}\n"
                 FAILED=1
               fi
-            else
-              echo "  ✓ CRC release v${CRC_VER} confirmed via /releases/latest"
+              echo ""
+              continue
             fi
 
-            # 2. Check if this version is in the known broken list
+            SUMMARY="${SUMMARY}  OCP ${OCP_VER} → CRC ${CRC_VER} (bundle ${BUNDLE_VER})\n"
+
+            # 1. Check if this version is in the known broken list
             BROKEN=$(echo "${PINS}" | jq -r \
               --arg ocp "${OCP_VER}" --arg crc "${CRC_VER}" \
               '.known_issues[$ocp].broken_versions // [] | contains([$crc]) | tostring')
@@ -90,7 +108,7 @@ jobs:
               echo "  ✓ CRC ${CRC_VER} is not in the known broken list for OCP ${OCP_VER}"
             fi
 
-            # 3. Check mirror reachability for the CRC binary
+            # 2. Check mirror reachability for the CRC binary
             MIRROR_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --head \
               "${{ env.CRC_MIRROR_URL }}/${CRC_VER}/crc-linux-amd64.tar.xz")
             if [ "${MIRROR_STATUS}" = "200" ] || [ "${MIRROR_STATUS}" = "302" ] || [ "${MIRROR_STATUS}" = "307" ]; then
@@ -98,6 +116,19 @@ jobs:
             else
               echo "  ✗ CRC binary NOT reachable at mirror (HTTP ${MIRROR_STATUS})"
               echo "    URL: ${{ env.CRC_MIRROR_URL }}/${CRC_VER}/crc-linux-amd64.tar.xz"
+              FAILED=1
+            fi
+
+            # 3. Check mirror reachability for the exact bundle z-version
+            #    embedded in the resolved CRC release — this is the file the
+            #    Dockerfile downloads when BUNDLE_VERSION is set.
+            BUNDLE_URL="${{ env.BUNDLE_MIRROR_URL }}/${BUNDLE_VER}/crc_libvirt_${BUNDLE_VER}_amd64.crcbundle"
+            BUNDLE_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --head "${BUNDLE_URL}")
+            if [ "${BUNDLE_STATUS}" = "200" ] || [ "${BUNDLE_STATUS}" = "302" ] || [ "${BUNDLE_STATUS}" = "307" ]; then
+              echo "  ✓ Exact bundle reachable at mirror (HTTP ${BUNDLE_STATUS})"
+            else
+              echo "  ✗ Exact bundle NOT reachable at mirror (HTTP ${BUNDLE_STATUS})"
+              echo "    URL: ${BUNDLE_URL}"
               FAILED=1
             fi
 
