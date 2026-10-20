@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          PINS=$(curl -fsSL "${{ env.PINS_URL }}")
+          PINS=$(curl -fsSL --retry 5 --retry-delay 3 "${{ env.PINS_URL }}")
 
           # Fetch the release list once so every matrix cell resolves against
           # the same data. resolve-crc-release.sh mirrors the runtime
@@ -167,7 +167,13 @@ jobs:
 
       - name: Push amd64 image
         if: steps.check.outputs.rebuilt == 'true'
-        run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 15
+          retry_wait_seconds: 30
+          command: |
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-amd64"
 
   build-arm64:
     needs: determine-versions
@@ -223,7 +229,13 @@ jobs:
 
       - name: Push arm64 image
         if: steps.check.outputs.rebuilt == 'true'
-        run: docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 15
+          retry_wait_seconds: 30
+          command: |
+            docker push "${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}-arm64"
 
   # Manifest lists are cheap to re-create (registry API calls only, no image
   # pulls), so this always runs and re-points each tag at the current arch
@@ -247,30 +259,40 @@ jobs:
           password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Create and push OCP version manifest
-        run: |
-          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 30
+          command: |
+            OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
 
-          docker manifest create "${OCP_TAG}" \
-            "${OCP_TAG}-amd64" \
-            "${OCP_TAG}-arm64"
+            docker manifest create --amend "${OCP_TAG}" \
+              "${OCP_TAG}-amd64" \
+              "${OCP_TAG}-arm64"
 
-          docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
-          docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
+            docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
+            docker manifest annotate "${OCP_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
 
-          docker manifest push "${OCP_TAG}"
-          echo "Pushed ${OCP_TAG}"
+            docker manifest push "${OCP_TAG}"
+            echo "Pushed ${OCP_TAG}"
 
       - name: Create and push CRC version manifest
-        run: |
-          OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
-          CRC_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.crc_version }}"
+        uses: nick-fields/retry@v4.0.0
+        with:
+          max_attempts: 3
+          timeout_minutes: 10
+          retry_wait_seconds: 30
+          command: |
+            OCP_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.ocp_version }}"
+            CRC_TAG="${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ matrix.crc_version }}"
 
-          docker manifest create "${CRC_TAG}" \
-            "${OCP_TAG}-amd64" \
-            "${OCP_TAG}-arm64"
+            docker manifest create --amend "${CRC_TAG}" \
+              "${OCP_TAG}-amd64" \
+              "${OCP_TAG}-arm64"
 
-          docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
-          docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
+            docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-amd64" --os linux --arch amd64
+            docker manifest annotate "${CRC_TAG}" "${OCP_TAG}-arm64" --os linux --arch arm64
 
-          docker manifest push "${CRC_TAG}"
-          echo "Pushed ${CRC_TAG}"
+            docker manifest push "${CRC_TAG}"
+            echo "Pushed ${CRC_TAG}"
