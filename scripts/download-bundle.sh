@@ -24,7 +24,7 @@ usage() {
     echo "Download CRC bundles to ~/.crc/cache"
     echo ""
     echo "Arguments:"
-    echo "  ocp_version    OpenShift version (e.g., 4.18, 4.19, 4.20)"
+    echo "  ocp_version    OpenShift version (e.g., 4.20, 4.21, 4.22)"
     echo ""
     echo "Examples:"
     echo "  $0 4.19                    # Download bundle for OCP 4.19"

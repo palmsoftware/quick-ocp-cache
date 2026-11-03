@@ -60,7 +60,7 @@ gh run watch
 
 - **🔄 Automatic Weekly Builds** - GitHub Actions workflow rebuilds cache images every Sunday at 02:00 UTC
 - **🏗️ Multi-Architecture Support** - Supports both `amd64` and `arm64` (Apple Silicon)
-- **🎯 Version-Specific Caches** - Separate images for each OpenShift version pinned in quick-ocp (4.18, 4.20, 4.21, 4.22)
+- **🎯 Version-Specific Caches** - Separate images for each OpenShift version pinned in quick-ocp (4.20, 4.21, 4.22)
 - **🧠 Drift-Aware Rebuilds** - Compares each registry image's `crc_version`/`bundle_version` labels against the current pins and rebuilds only on drift
 - **📦 Complete Package** - Includes both CRC binary and corresponding OpenShift bundle
 - **🔍 Rich Metadata** - JSON metadata with versions, sizes, URLs, and build timestamps
@@ -72,10 +72,14 @@ All images are hosted at: **`quay.io/bapalm/quick-ocp-cache`**
 
 | Tag | OCP Version | Architectures |
 |-----|-------------|---------------|
-| `4.18` | 4.18 | amd64, arm64 |
 | `4.20` | 4.20 | amd64, arm64 |
 | `4.21` | 4.21 | amd64, arm64 |
 | `4.22` | 4.22 | amd64, arm64 |
+
+> **4.18 is no longer built.** OCP 4.18 is deprecated in quick-ocp and now
+> resolves to 4.20, so its pin was removed there and this cache stopped
+> refreshing the tag. The existing `4.18` images remain on Quay but will not
+> be rebuilt; new deployments should use `4.20` or later.
 
 The CRC version (and exact bundle z-version) each tag carries follows
 [quick-ocp's `crc-version-pins.json`](https://github.com/palmsoftware/quick-ocp/blob/main/crc-version-pins.json)
@@ -196,7 +200,6 @@ To change which versions get built, edit the pins in quick-ocp.
 ```json
 {
   "version_pins": {
-    "4.18": "auto",
     "4.20": "auto",
     "4.21": "auto",
     "4.22": "auto",
@@ -332,7 +335,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ocp_version: ["4.18", "4.20", "4.21"]
+        ocp_version: ["4.20", "4.21"]
     
     steps:
       - name: Checkout
@@ -347,7 +350,6 @@ jobs:
           # (from crc-version-pins.json and the crc release list) instead of
           # hardcoding.
           case "$OCP_VERSION" in
-            "4.18") CRC_VERSION="2.51.0" ;;
             "4.20") CRC_VERSION="2.57.0" ;;
             "4.21") CRC_VERSION="2.61.0" ;;
           esac

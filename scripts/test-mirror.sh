@@ -223,7 +223,7 @@ else
         echo ""
     else
         echo -e "${YELLOW}No ocp-versions.json found, testing default versions...${NC}"
-        VERSIONS="4.18 4.19 4.20"
+        VERSIONS="4.19 4.20"
         echo ""
     fi
     
