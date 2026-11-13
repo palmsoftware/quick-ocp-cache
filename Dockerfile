@@ -31,6 +31,7 @@ RUN echo "Determining CRC version for OCP ${OCP_VERSION}..." && \
             "4.18") CRC_VERSION="2.51.0" ;; \
             "4.19") CRC_VERSION="2.54.0" ;; \
             "4.20") CRC_VERSION="2.56.0" ;; \
+            "5.0") CRC_VERSION="2.65.0" ;; \
             *) echo "Fetching latest CRC version for OCP ${OCP_VERSION}..."; \
                CRC_VERSION=$(curl -s "https://api.github.com/repos/crc-org/crc/releases/latest" | \
                             jq -r '.tag_name | ltrimstr("v")') ;; \
