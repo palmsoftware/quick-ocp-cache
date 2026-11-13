@@ -75,6 +75,7 @@ All images are hosted at: **`quay.io/bapalm/quick-ocp-cache`**
 | `4.20` | 4.20 | amd64, arm64 |
 | `4.21` | 4.21 | amd64, arm64 |
 | `4.22` | 4.22 | amd64, arm64 |
+| `5.0` | 5.0 | amd64, arm64 |
 
 > **4.18 is no longer built.** OCP 4.18 is deprecated in quick-ocp and now
 > resolves to 4.20, so its pin was removed there and this cache stopped
@@ -203,6 +204,7 @@ To change which versions get built, edit the pins in quick-ocp.
     "4.20": "auto",
     "4.21": "auto",
     "4.22": "auto",
+    "5.0": "auto",
     "latest": "auto"
   }
 }
